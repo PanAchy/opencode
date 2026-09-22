@@ -436,7 +436,7 @@ describe("ShellTool scanner permissions", () => {
               value: {
                 status: "completed",
                 metadata: { exit: 0 },
-                content: [{ type: "text", text: `${fixture.outside}\n` }, { type: "text" }],
+                content: [{ type: "text", text: `${fixture.outside}\n` }],
               },
             })
             expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("reached")
@@ -470,7 +470,7 @@ describe("ShellTool scanner permissions", () => {
             value: {
               status: "completed",
               metadata: { exit: 0 },
-              content: [{ type: "text", text: `${fixture.outside}\n` }, { type: "text" }],
+              content: [{ type: "text", text: `${fixture.outside}\n` }],
             },
           })
           expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("reached")
@@ -517,7 +517,7 @@ describe("ShellTool scanner permissions", () => {
               value: {
                 status: "completed",
                 metadata: { exit: 0 },
-                content: [{ type: "text", text: `${fixture.outside}\n` }, { type: "text" }],
+                content: [{ type: "text", text: `${fixture.outside}\n` }],
               },
             })
             expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("reached")
@@ -661,7 +661,7 @@ describe("ShellTool compound syntax approval compatibility", () => {
                 value: {
                   status: "completed",
                   metadata: { exit: 0 },
-                  content: [{ type: "text", text: fixture.output }, { type: "text" }],
+                  content: [{ type: "text", text: fixture.output }],
                 },
               })
             }),
@@ -729,7 +729,7 @@ describe("ShellTool ordinary shell syntax", () => {
                   value: {
                     status: "completed",
                     metadata: { exit: 0 },
-                    content: [{ type: "text", text: fixture.output }, { type: "text" }],
+                    content: [{ type: "text", text: fixture.output }],
                   },
                 })
               }),
@@ -907,10 +907,7 @@ describe("ShellTool", () => {
               const settled = yield* executeTool(registry, call({ command: helloCommand }))
               expect(settled.status).toBe("completed")
               expect(settled.metadata).toMatchObject({ exit: 0, truncated: false })
-              expect(settled.content?.[0]).toEqual({ type: "text", text: "hello" })
-              expect(settled.content?.[1]).toMatchObject(
-                Expected.text(expect.stringContaining("Command exited with code 0.")),
-              )
+              expect(settled.content).toEqual([{ type: "text", text: "hello" }])
               expect(assertions).toMatchObject([
                 {
                   sessionID,
@@ -1330,7 +1327,7 @@ describe("ShellTool", () => {
               expect(settled.metadata).toMatchObject({ exit: 7, truncated: false })
               expect(settled.content?.[0]).toEqual({ type: "text", text: "body" })
               expect(settled.content?.[1]).toMatchObject(
-                Expected.text(expect.stringContaining("Command exited with code 7")),
+                Expected.text(expect.stringContaining("Exited with code 7")),
               )
             }),
           ),
@@ -1359,7 +1356,7 @@ describe("ShellTool", () => {
                 expect(content.text.includes("output-start")).toBe(false)
                 expect(content.text.includes("output-end")).toBe(true)
                 expect(content).toMatchObject(
-                  Expected.text(expect.stringContaining("output truncated; full output saved to:")),
+                  Expected.text(expect.stringContaining("full output saved to ")),
                 )
               }),
             ),
@@ -1391,7 +1388,7 @@ describe("ShellTool", () => {
           expect(content.text).not.toContain("one")
           // Windows shells emit CRLF; the assertion targets line limits, not line endings.
           expect(content.text.replaceAll("\r\n", "\n")).toStartWith("two\nthree")
-          expect(content.text).toContain("output truncated; full output saved to:")
+          expect(content.text).toContain("full output saved to ")
         })
       },
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]().then(() => undefined)),
@@ -1488,7 +1485,7 @@ describe("ShellTool", () => {
             expect((yield* shell.list()).map((info) => info.id)).toContain(id)
             expect((yield* shell.wait(id)).status).toBe("timeout")
             expect((yield* Fiber.join(admitted)).valueOrUndefined?.data.item.payload).toMatchObject({
-              text: expect.stringContaining("Command timed out before completion."),
+              text: expect.stringContaining("Timed out before completion"),
               description: idleCommand,
               metadata: {
                 source: "shell",
@@ -1525,7 +1522,7 @@ describe("ShellTool", () => {
             const shellID = settled.metadata?.shellID
             expect(typeof shellID).toBe("string")
             expect((yield* Fiber.join(admitted)).valueOrUndefined?.data.item.payload).toMatchObject({
-              text: expect.stringContaining("Command exited with code 7."),
+              text: expect.stringContaining("Exited with code 7"),
               description: bodyExitCommand,
               metadata: {
                 source: "shell",
@@ -1575,7 +1572,7 @@ describe("ShellTool", () => {
               {
                 id: settled.metadata?.shellID,
                 status: "completed",
-                output: "(no output)\n\nCommand exited with code 7.",
+                output: "Exited with code 7",
               },
             ])
           }),
