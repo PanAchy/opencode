@@ -5,10 +5,12 @@ import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { Global } from "@opencode/util/global"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Bus } from "@opencode/core/bus"
 import { Database } from "@opencode/core/database/database"
 import { Location } from "@opencode/core/location"
 import { LocationActivity } from "@opencode/core/location-activity"
+import { Watcher } from "@opencode/core/filesystem/watcher"
 import { LocationServiceMap } from "@opencode/core/location-services"
 import { Plugin } from "@opencode/core/plugin"
 import { Rpc } from "@opencode/core/rpc"
@@ -31,7 +33,7 @@ const it = testEffect(
         makeGlobalNode({
           service: LocationActivity.Service,
           layer: LocationActivity.layer({ timeToLive: "2 seconds", sweepInterval: "100 millis" }),
-          deps: [Bus.node, LocationServiceMap.node, SessionExecution.node, SessionStore.node],
+          deps: [Bus.node, LocationServiceMap.node, SessionExecution.node, SessionStore.node, Global.node, FSUtil.node, Watcher.node],
         }),
       ),
     ],

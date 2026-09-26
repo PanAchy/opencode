@@ -1,12 +1,17 @@
+import path from "path"
+import fs from "fs/promises"
 import { describe, expect } from "bun:test"
 import { Context, Deferred, Duration, Effect, Fiber, Layer, LayerMap, RcMap, Schema } from "effect"
 import { TestClock } from "effect/testing"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
+import { Global } from "@opencode/util/global"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Bus } from "@opencode/core/bus"
 import { Database } from "@opencode/core/database/database"
 import { Form } from "@opencode/core/form"
+import { Watcher } from "@opencode/core/filesystem/watcher"
 import { Location } from "@opencode/core/location"
 import { LocationActivity } from "@opencode/core/location-activity"
 import { LocationServiceMap, type LocationServices } from "@opencode/core/location-services"
@@ -21,6 +26,8 @@ import { SessionTable } from "@opencode/core/session/sql"
 import { SessionStore } from "@opencode/core/session/store"
 import { Workspace } from "@opencode/core/workspace"
 import { testEffect } from "./lib/effect"
+import { tempGlobalLayer } from "./fixture/global"
+import { tmpdirScoped } from "./fixture/tmpdir"
 
 // Keep real execution ownership, location caching, forms, and eviction. The fixture
 // runner waits on a form instead of making a model request before asking a question.
@@ -78,29 +85,204 @@ const locations = Layer.effect(
   }),
 )
 
+const watcher = Watcher.testLayer
 const it = testEffect(
-  AppNodeBuilder.build(
-    LayerNode.group([
-      Database.node,
-      Bus.node,
-      SessionStore.node,
-      LocationServiceMap.node,
-      SessionExecution.node,
-      LocationActivity.node,
-    ]),
-    [
-      LocationServiceMap.node.replace(
-        makeGlobalNode({
-          service: LocationServiceMap.Service,
-          layer: locations,
-          deps: [Bus.node],
-        }),
-      ),
-    ],
+  Layer.mergeAll(
+    AppNodeBuilder.build(
+      LayerNode.group([
+        Database.node,
+        Global.node,
+        Watcher.node,
+        Bus.node,
+        SessionStore.node,
+        LocationServiceMap.node,
+        SessionExecution.node,
+        LocationActivity.node,
+      ]),
+      [
+        Global.node.replace(tempGlobalLayer),
+        Watcher.node.replace(watcher),
+        LocationServiceMap.node.replace(
+          makeGlobalNode({
+            service: LocationServiceMap.Service,
+            layer: locations,
+            deps: [Bus.node],
+          }),
+        ),
+      ],
+    ),
+    watcher,
   ),
 )
 
 describe("LocationActivity eviction", () => {
+  it.effect("sweeps short global timeouts without waiting a full minute", () =>
+    Effect.gen(function* () {
+      const map = yield* LocationServiceMap.Service
+      const global = yield* Global.Service
+      const watcher = yield* Watcher.Test
+      const file = path.join(global.config, "opencode.jsonc")
+      yield* TestClock.adjust("1 second")
+      yield* Effect.promise(() => fs.writeFile(file, '{"location_inactivity_timeout":"2 seconds"}'))
+      yield* watcher.emit({ path: file, type: "update" })
+      yield* TestClock.adjust("1 minute")
+      const ref = LocationServiceMap.canonical({ directory: AbsolutePath.make("/short-timeout") })
+      yield* Location.Service.pipe(Effect.provide(map.get(ref)), Effect.scoped)
+      expect(Array.from(yield* RcMap.keys(map.rcMap))).toEqual([ref])
+      yield* TestClock.adjust("5 seconds")
+      expect(Array.from(yield* RcMap.keys(map.rcMap))).toEqual([])
+    }),
+  )
+
+  it.effect("applies global duration and disabled edits live, resetting existing deadlines", () =>
+    Effect.gen(function* () {
+      const map = yield* LocationServiceMap.Service
+      const global = yield* Global.Service
+      const watcher = yield* Watcher.Test
+      const file = path.join(global.config, "opencode.jsonc")
+      yield* TestClock.adjust("1 second")
+      expect(yield* watcher.subscriptions()).toContainEqual({
+        path: global.config,
+        type: "entries",
+        names: ["opencode.json", "opencode.jsonc"],
+      })
+      const ref = LocationServiceMap.canonical({ directory: AbsolutePath.make("/project") })
+      yield* Location.Service.pipe(Effect.provide(map.get(ref)), Effect.scoped)
+      yield* TestClock.adjust("1 minute")
+
+      const update = (value: string) =>
+        Effect.promise(() => fs.writeFile(file, value)).pipe(
+          Effect.andThen(watcher.emit({ path: file, type: "update" })),
+          Effect.andThen(TestClock.adjust("200 millis")),
+        )
+      yield* update('{"location_inactivity_timeout":"2 minutes"}')
+      yield* TestClock.adjust("1 minute")
+      expect(Array.from(yield* RcMap.keys(map.rcMap))).toEqual([ref])
+      yield* TestClock.adjust("3 minutes")
+      expect(Array.from(yield* RcMap.keys(map.rcMap))).toEqual([])
+
+      yield* Location.Service.pipe(Effect.provide(map.get(ref)), Effect.scoped)
+      yield* update('{"location_inactivity_timeout":false}')
+      yield* TestClock.adjust("90 minutes")
+      expect(Array.from(yield* RcMap.keys(map.rcMap))).toEqual([ref])
+
+      yield* update('{"location_inactivity_timeout":"0 seconds"}')
+      yield* TestClock.adjust("62 minutes")
+      expect(Array.from(yield* RcMap.keys(map.rcMap))).toEqual([ref])
+
+      yield* update('{"location_inactivity_timeout":"2 minutes"}')
+      yield* TestClock.adjust("1 minute")
+      expect(Array.from(yield* RcMap.keys(map.rcMap))).toEqual([ref])
+      yield* TestClock.adjust("3 minutes")
+      expect(Array.from(yield* RcMap.keys(map.rcMap))).toEqual([])
+    }),
+  )
+
+  it.effect("ignores invalid global edits and project overrides", () =>
+    Effect.gen(function* () {
+      const map = yield* LocationServiceMap.Service
+      const global = yield* Global.Service
+      const watcher = yield* Watcher.Test
+      const file = path.join(global.config, "opencode.jsonc")
+      const project = (yield* tmpdirScoped()).path
+      const ref = LocationServiceMap.canonical({ directory: AbsolutePath.make(project) })
+      yield* TestClock.adjust("1 second")
+      expect(yield* watcher.subscriptions()).toContainEqual({
+        path: global.config,
+        type: "entries",
+        names: ["opencode.json", "opencode.jsonc"],
+      })
+      yield* Effect.promise(() =>
+        fs.writeFile(path.join(project, "opencode.jsonc"), '{"location_inactivity_timeout":false}'),
+      )
+      yield* Location.Service.pipe(Effect.provide(map.get(ref)), Effect.scoped)
+      yield* Effect.promise(() => fs.writeFile(file, '{"location_inactivity_timeout":"0 seconds"}'))
+      yield* watcher.emit({ path: file, type: "update" })
+      yield* TestClock.adjust("200 millis")
+      yield* TestClock.adjust("62 minutes")
+      expect(Array.from(yield* RcMap.keys(map.rcMap))).toEqual([])
+    }),
+  )
+
+  it.effect("uses a valid higher-priority global file despite an invalid lower-priority file", () =>
+    Effect.gen(function* () {
+      const map = yield* LocationServiceMap.Service
+      const global = yield* Global.Service
+      const watcher = yield* Watcher.Test
+      yield* TestClock.adjust("1 second")
+      const lower = path.join(global.config, "opencode.json")
+      const higher = path.join(global.config, "opencode.jsonc")
+      yield* Effect.promise(() =>
+        Promise.all([
+          fs.writeFile(lower, '{"location_inactivity_timeout":"0 seconds"}'),
+          fs.writeFile(higher, '{"location_inactivity_timeout":"2 seconds"}'),
+        ]),
+      )
+      yield* watcher.emit({ path: higher, type: "update" })
+      yield* TestClock.adjust("1 minute")
+      const ref = LocationServiceMap.canonical({ directory: AbsolutePath.make("/priority") })
+      yield* Location.Service.pipe(Effect.provide(map.get(ref)), Effect.scoped)
+      yield* TestClock.adjust("5 seconds")
+      expect(Array.from(yield* RcMap.keys(map.rcMap))).toEqual([])
+    }),
+  )
+
+  it.effect("gives a waiting execution a fresh deadline when the timeout is shortened", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const bus = yield* Bus.Service
+      const map = yield* LocationServiceMap.Service
+      const execution = yield* SessionExecution.Service
+      const global = yield* Global.Service
+      const watcher = yield* Watcher.Test
+      const ref = LocationServiceMap.canonical({ directory: AbsolutePath.make("/waiting-shortened") })
+      const sessionID = Session.ID.make("ses_waiting_shortened")
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: ref.directory, sandboxes: [] })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: sessionID,
+          project_id: Project.ID.global,
+          slug: "question",
+          directory: ref.directory,
+          title: "Waiting question",
+          version: "test",
+        })
+        .run()
+        .pipe(Effect.orDie)
+      const created = yield* Deferred.make<Form.Info>()
+      const unsubscribe = yield* bus.listen((event) => {
+        if (event.type !== Form.Event.Created.type) return Effect.void
+        return Deferred.succeed(created, Schema.decodeUnknownSync(Form.Event.Created.data)(event.data).form)
+      })
+      yield* Effect.addFinalizer(() => unsubscribe)
+      const running = yield* execution.resume(sessionID).pipe(Effect.exit, Effect.forkScoped)
+      yield* Effect.addFinalizer(() =>
+        execution.interrupt(sessionID).pipe(Effect.andThen(TestClock.adjust("5 minutes"))),
+      )
+      const form = yield* Deferred.await(created)
+      const context = yield* map.contextEffect(ref).pipe(Effect.scoped)
+      const forms = Context.get(context, Form.Service)
+      yield* TestClock.adjust("1 minute")
+      yield* TestClock.adjust("57 minutes")
+      const file = path.join(global.config, "opencode.jsonc")
+      yield* Effect.promise(() => fs.writeFile(file, '{"location_inactivity_timeout":"2 minutes"}'))
+      yield* watcher.emit({ path: file, type: "update" })
+      yield* TestClock.adjust("200 millis")
+      yield* TestClock.adjust("1 minute")
+      expect(yield* forms.state(form.id)).toEqual({ status: "pending" })
+      expect(Array.from(yield* execution.active)).toEqual([sessionID])
+      yield* TestClock.adjust("3 minutes")
+      expect(yield* forms.state(form.id)).toEqual({ status: "cancelled" })
+      yield* TestClock.adjust("5 minutes")
+      expect((yield* Fiber.join(running))._tag).toBe("Failure")
+      expect(Array.from(yield* RcMap.keys(map.rcMap))).toEqual([])
+    }),
+  )
   for (const [count, admission] of [
     [1, "none"],
     [2, "none"],

@@ -1,6 +1,6 @@
 export * as Config from "./config.js"
 
-import { Schema } from "effect"
+import { Duration, Schema } from "effect"
 import { ephemeral, inventory } from "./event.js"
 import { Permission } from "./permission.js"
 import { AbsolutePath, optional } from "./schema.js"
@@ -60,6 +60,22 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   snapshots: Schema.Boolean.pipe(optional).annotate({
     description: "Enable snapshots used for undo and revert behavior",
   }),
+  location_inactivity_timeout: Schema.Union([
+    Schema.DurationFromString.pipe(
+      Schema.refine(
+        (duration): duration is typeof duration =>
+          Duration.toMillis(duration) > 0 && Number.isFinite(Duration.toMillis(duration)),
+        {
+          message: "Expected a positive, finite duration",
+        },
+      ),
+    ),
+    Schema.Literal(false),
+  ])
+    .pipe(optional)
+    .annotate({
+      description: 'Global-only idle Location eviction timeout (default: "60 minutes"); false disables eviction',
+    }),
   watcher: ConfigWatcher.Info.pipe(optional).annotate({
     description: "Filesystem watcher configuration",
   }),

@@ -136,6 +136,19 @@ Project-level values are ignored.
 }
 ```
 
+### Location inactivity timeout
+
+Set this **only in the global** `~/.config/opencode/opencode.jsonc` to control when the server releases idle Location resources. The default is `"60 minutes"`; set a positive duration to change it, or `false` to keep idle Locations until the server stops. Project-level values are ignored.
+
+```jsonc title="~/.config/opencode/opencode.jsonc"
+{
+  "location_inactivity_timeout": "2 hours",
+  // Or use false to disable automatic inactivity eviction.
+}
+```
+
+An eviction interrupts executions still waiting for input at that Location. Changes take effect without restarting the server; a changed duration starts a fresh deadline for cached Locations.
+
 ### Sharing
 
 Set the session sharing policy. OpenCode accepts this field, but session sharing

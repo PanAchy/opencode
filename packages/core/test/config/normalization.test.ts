@@ -79,6 +79,22 @@ describe("ConfigNormalize", () => {
     expect(Duration.toMillis(info.warming.duration ?? Duration.zero)).toBe(1_800_000)
   })
 
+  test("accepts a positive location timeout or false and diagnoses invalid durations", () => {
+    expect(normalized({ location_inactivity_timeout: "2 hours" }).encoded.location_inactivity_timeout).toBe(
+      "7200000 millis",
+    )
+    expect(decoded({ location_inactivity_timeout: false }).location_inactivity_timeout).toBe(false)
+    for (const value of [true, "0 seconds", "-1 minute", "forever"]) {
+      const result = normalized({ location_inactivity_timeout: value })
+      expect(result.encoded.location_inactivity_timeout).toBeUndefined()
+      expect(result.diagnostics).toContainEqual({
+        kind: "invalid",
+        path: ["location_inactivity_timeout"],
+        message: "skipped malformed recognized value",
+      })
+    }
+  })
+
   test("preserves arbitrary JSON-round-tripped native configuration", () => {
     FastCheck.assert(
       FastCheck.property(Schema.toArbitrary(Info)(FastCheck), (info) => {
