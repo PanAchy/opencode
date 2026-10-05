@@ -3,7 +3,7 @@ import { Service, type Info } from "@opencode/client/effect/service"
 import { Global } from "@opencode/util/global"
 import { OPENCODE_VERSION } from "../src/version"
 import { expect, test } from "bun:test"
-import { Effect, Schema } from "effect"
+import { Effect, FileSystem, Schedule, Schema } from "effect"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -19,6 +19,24 @@ test("managed service ports are stable per installation channel", () => {
   expect(ServiceConfig.defaultPort("local")).toBe(0xc0df)
   expect(ServiceConfig.defaultPort("preview-a")).toBe(ServiceConfig.defaultPort("preview-a"))
   expect(ServiceConfig.defaultPort("preview-a")).not.toBe(ServiceConfig.defaultPort("preview-b"))
+})
+
+test("service disabled accepts only booleans without changing configuration on invalid input", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-disabled-config-"))
+  const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
+  const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem>) =>
+    Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer)))
+  try {
+    expect(await run(ServiceConfig.get("disabled"))).toBe("false")
+    await expect(run(ServiceConfig.set("disabled", "yes"))).rejects.toThrow("Disabled must be true or false")
+    expect(await run(ServiceConfig.read())).toEqual({})
+    await run(ServiceConfig.set("disabled", "true"))
+    expect(await run(ServiceConfig.read())).toEqual({ disabled: true })
+    await run(ServiceConfig.unset("disabled"))
+    expect(await run(ServiceConfig.read())).toEqual({})
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
 })
 
 test("local channel stores service config with the local service filename", async () => {
@@ -265,6 +283,7 @@ test("concurrent service processes elect one server", async () => {
       urls: [info.url],
       // The server reports the canonical tmp directory; Windows os.tmpdir() can be an 8.3 short name.
       paths: { tmp: await fs.realpath(path.join(os.tmpdir(), "opencode")) },
+      capabilities: { persistentPty: process.platform !== "win32" },
     })
     const contender = Bun.spawn(command, { env, stderr: "pipe", stdout: "ignore" })
     try {
@@ -383,6 +402,77 @@ test("unrelated managed port occupancy reports an actionable conflict", async ()
     await fs.rm(root, { recursive: true, force: true })
   }
 }, 30_000)
+
+test("the original managed service contender binds when the occupied port is released", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-bind-retry-"))
+  const recognizing = Promise.withResolvers<void>()
+  const requests: string[] = []
+  using listener = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      requests.push(new URL(request.url).pathname)
+      if (requests.length === 2) recognizing.resolve()
+      return Response.json({ unrelated: true })
+    },
+  })
+  const port = listener.port
+  if (port === undefined) throw new Error("Server did not bind a port")
+  const registration = path.join(root, "state", "opencode", "service-local.json")
+  await fs.mkdir(path.join(root, "config"), { recursive: true })
+  await fs.mkdir(path.dirname(registration), { recursive: true })
+  await fs.writeFile(path.join(root, "config", "service-local.json"), JSON.stringify({ port }))
+  await fs.writeFile(
+    registration,
+    JSON.stringify({
+      id: "stale",
+      version: OPENCODE_VERSION,
+      url: "http://127.0.0.1:1",
+      pid: 2_147_483_647,
+      password: "stale",
+    }),
+  )
+  const contender = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"], {
+    env: isolatedEnv(root),
+    stderr: "pipe",
+    stdout: "ignore",
+  })
+  const stderr = new Response(contender.stderr).text()
+  try {
+    // The first probe is preflight; the second only happens after start() fails to bind.
+    expect(await Promise.race([recognizing.promise.then(() => true), Bun.sleep(20_000).then(() => false)])).toBe(true)
+    expect(requests).toEqual(["/api/info", "/api/info"])
+    await listener.stop(true)
+
+    const info = await Promise.race([
+      waitForInfo(registration, (info) => info.pid === contender.pid),
+      contender.exited.then(() => undefined),
+    ])
+    expect(info?.pid, contender.exitCode === null ? undefined : await stderr).toBe(contender.pid)
+    const endpoint = await Effect.runPromise(
+      Service.discover({ file: registration }).pipe(
+        Effect.filterOrFail((value) => value !== undefined),
+        Effect.retry({ times: 400, schedule: Schedule.spaced("50 millis") }),
+        Effect.provide(NodeFileSystem.layer),
+      ),
+    )
+    expect(new URL(endpoint.url).port).toBe(String(port))
+    expect(
+      await fetch(new URL("/api/info", endpoint.url), { headers: Service.headers(endpoint) }).then((response) =>
+        response.json(),
+      ),
+    ).toMatchObject({ pid: contender.pid, version: OPENCODE_VERSION, urls: [endpoint.url] })
+    expect(contender.exitCode).toBe(null)
+    await Effect.runPromise(Service.stop({ file: registration }).pipe(Effect.provide(NodeFileSystem.layer)))
+    expect(await waitForExit(contender)).toBe(true)
+    expect(await Bun.file(registration).exists()).toBe(false)
+    await expectPortAvailable(port)
+  } finally {
+    contender.kill("SIGTERM")
+    await contender.exited
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}, 45_000)
 
 test("unresponsive managed port occupancy reports a bounded conflict", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-unresponsive-conflict-"))

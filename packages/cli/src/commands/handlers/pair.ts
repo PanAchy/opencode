@@ -10,6 +10,10 @@ import { ServiceConfig } from "../../services/service-config"
 export default Runtime.handler(
   Commands.commands.pair,
   Effect.fn("cli.pair")(function* (input: Runtime.Input<typeof Commands.commands.pair>) {
+    if ((yield* ServiceConfig.read()).disabled === true)
+      return yield* Effect.fail(
+        new Error("Pairing requires the background service; run `opencode service unset disabled` first"),
+      )
     const endpoint = yield* Service.ensure(yield* ServiceConfig.options())
     const client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) })
     const urls = Option.isSome(input.url)
@@ -26,8 +30,9 @@ export default Runtime.handler(
         ...(links[0]
           ? [
               "",
+              // uqr separates rows with "\n" on every platform, so splitting on EOL ("\r\n" on Windows) indents only the first row.
               renderUnicodeCompact(links[0], { border: 2 })
-                .split(EOL)
+                .split("\n")
                 .map((line) => "  " + line)
                 .join(EOL),
             ]
